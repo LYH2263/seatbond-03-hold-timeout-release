@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
     database_url: str = "postgresql+psycopg2://seatbond:seatbond@localhost:5442/seatbond"
     seed_on_empty: bool = True
+    hold_ttl_seconds: int = 600  # 默认持座时长，到期未支付即释放
 
 
 settings = Settings()

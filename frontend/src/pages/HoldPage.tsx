@@ -9,6 +9,8 @@ type Hold = {
   start_col: number;
   end_col: number;
   party_size: number;
+  status: string;
+  expires_at: string;
 };
 
 export default function HoldPage() {
@@ -35,7 +37,8 @@ export default function HoldPage() {
       if (prefRow) body.preferred_row = Number(prefRow);
       const hold = await api<Hold>("/holds", { method: "POST", body: JSON.stringify(body) });
       setLast(hold);
-      setMsg(`已锁座 ${hold.order_code}：第${hold.row}排 ${hold.start_col}-${hold.end_col}`);
+      const exp = new Date(hold.expires_at).toLocaleString("zh-CN", { hour12: false });
+      setMsg(`已锁座 ${hold.order_code}：第${hold.row}排 ${hold.start_col}-${hold.end_col}（${exp} 到期）`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }

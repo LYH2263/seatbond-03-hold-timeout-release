@@ -19,8 +19,16 @@ export default function SeatMapPage() {
 
   useEffect(() => {
     if (sid === "") return;
-    api<MapOut>(`/seatmap/${sid}`).then(setMap);
+    const load = () => api<MapOut>(`/seatmap/${sid}`).then(setMap);
+    load();
+    // 定时刷新：到期持座在后端即时释放，座位图保持与释放结果一致。
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
   }, [sid]);
+
+  function refresh() {
+    if (sid !== "") api<MapOut>(`/seatmap/${sid}`).then(setMap);
+  }
 
   const gridStyle = useMemo(
     () => ({ gridTemplateColumns: map ? `repeat(${map.cols}, 28px)` : undefined }),
@@ -45,6 +53,7 @@ export default function SeatMapPage() {
             {map.hall_name} · {map.rows}×{map.cols} · 热力座图
           </span>
         )}
+        <button onClick={refresh}>刷新座位图</button>
       </div>
       <div className="screen">银 幕</div>
       {map && (

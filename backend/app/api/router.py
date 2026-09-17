@@ -1,16 +1,18 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
-from app.models.models import ConflictLog, Hall, SeatHold, Showtime
+from app.models.models import STATUS_HELD, ConflictLog, Hall, SeatHold, Showtime
 from app.schemas.schemas import (
     ConflictOut,
     HallOut,
     HoldOut,
     HoldRequest,
+    ReleaseScanOut,
     SeatMapCell,
     SeatMapOut,
     ShowtimeOut,
@@ -22,6 +24,7 @@ from app.services.bond_engine import (
     find_bond_across_rows,
     find_contiguous_block,
 )
+from app.services.hold_expiry import active_holds, release_expired_holds
 
 api_router = APIRouter()
 
@@ -72,7 +75,9 @@ def seatmap(showtime_id: int, db: Session = Depends(get_db)):
     hall = db.get(Hall, st.hall_id)
     assert hall
     aisles = set(_aisles(hall))
-    holds = db.scalars(select(SeatHold).where(SeatHold.showtime_id == showtime_id)).all()
+    # 先即时释放本场次到期持座，保证刷新后座位图与释放结果严格一致。
+    release_expired_holds(db, showtime_id=showtime_id)
+    holds = active_holds(db, showtime_id=showtime_id)
     occupied: set[tuple[int, int]] = set()
     for h in holds:
         for c in range(h.start_col, h.end_col + 1):
@@ -101,8 +106,28 @@ def seatmap(showtime_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.get("/holds", response_model=list[HoldOut])
-def list_holds(db: Session = Depends(get_db)):
-    return db.scalars(select(SeatHold).order_by(SeatHold.id.desc())).all()
+def list_holds(
+    status: str | None = Query(default=None, pattern="^(held|released)$"),
+    showtime_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """持座列表，可按状态（held 持有中 / released 已释放）与场次筛选。"""
+    stmt = select(SeatHold)
+    if status:
+        stmt = stmt.where(SeatHold.status == status)
+    if showtime_id is not None:
+        stmt = stmt.where(SeatHold.showtime_id == showtime_id)
+    return db.scalars(stmt.order_by(SeatHold.id.desc())).all()
+
+
+@api_router.post("/holds/release-expired", response_model=ReleaseScanOut)
+def release_expired(
+    showtime_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """扫描并释放到期持座；不传场次即全局扫描。幂等，重复执行不新增持座。"""
+    count = release_expired_holds(db, showtime_id=showtime_id)
+    return ReleaseScanOut(showtime_id=showtime_id, released=count)
 
 
 @api_router.get("/conflicts", response_model=list[ConflictOut])
@@ -118,7 +143,9 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
     hall = db.get(Hall, st.hall_id)
     assert hall
     aisles = set(_aisles(hall))
-    existing = db.scalars(select(SeatHold).where(SeatHold.showtime_id == body.showtime_id)).all()
+    # 先释放本场到期持座，自动连座搜索立刻把到期格子当空闲。
+    release_expired_holds(db, showtime_id=body.showtime_id)
+    existing = active_holds(db, showtime_id=body.showtime_id)
     holds = [HoldSpan(row=h.row, start_col=h.start_col, end_col=h.end_col) for h in existing]
     seats_by_row: dict[int, list[SeatCell]] = {}
     for r in range(1, hall.rows + 1):
@@ -156,7 +183,8 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
         db.commit()
         raise HTTPException(409, "与既有持座冲突")
 
-    code = f"SB-{int(datetime.utcnow().timestamp()) % 100000:05d}"
+    now = datetime.utcnow()
+    code = f"SB-{int(now.timestamp()) % 100000:05d}"
     hold = SeatHold(
         showtime_id=body.showtime_id,
         order_code=code,
@@ -164,6 +192,9 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
         start_col=block.start_col,
         end_col=block.end_col,
         party_size=body.party_size,
+        status=STATUS_HELD,
+        created_at=now,
+        expires_at=now + timedelta(seconds=settings.hold_ttl_seconds),
     )
     db.add(hold)
     db.commit()

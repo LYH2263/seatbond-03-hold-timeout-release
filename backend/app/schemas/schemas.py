@@ -29,7 +29,15 @@ class HoldOut(BaseModel):
     end_col: int
     party_size: int
     status: str
+    created_at: datetime
+    expires_at: datetime
+    released_at: datetime | None = None
     model_config = {"from_attributes": True}
+
+
+class ReleaseScanOut(BaseModel):
+    showtime_id: int | None = None
+    released: int
 
 
 class HoldRequest(BaseModel):
