@@ -29,6 +29,9 @@ class HoldOut(BaseModel):
     end_col: int
     party_size: int
     status: str
+    created_at: datetime
+    expires_at: datetime
+    released_at: datetime | None = None
     model_config = {"from_attributes": True}
 
 
@@ -36,6 +39,18 @@ class HoldRequest(BaseModel):
     showtime_id: int
     party_size: int = Field(ge=1, le=12)
     preferred_row: int | None = None
+
+
+class HoldScanOut(BaseModel):
+    """一次超时扫描的结果（按场次或全局）。"""
+
+    showtime_id: int | None
+    released_count: int
+    released_ids: list[int]
+
+
+class ReleaseScanRequest(BaseModel):
+    showtime_id: int | None = None
 
 
 class ConflictOut(BaseModel):

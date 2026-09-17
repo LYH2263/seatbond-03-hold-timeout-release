@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 
 type Show = { id: number; film_title: string; hall_name?: string };
@@ -17,10 +17,15 @@ export default function SeatMapPage() {
     });
   }, []);
 
-  useEffect(() => {
+  // 后端在出图前会先懒释放本场次到期持座，因此刷新后占用与释放结果一致。
+  const loadMap = useCallback(() => {
     if (sid === "") return;
     api<MapOut>(`/seatmap/${sid}`).then(setMap);
   }, [sid]);
+
+  useEffect(() => {
+    loadMap();
+  }, [loadMap]);
 
   const gridStyle = useMemo(
     () => ({ gridTemplateColumns: map ? `repeat(${map.cols}, 28px)` : undefined }),
@@ -45,6 +50,9 @@ export default function SeatMapPage() {
             {map.hall_name} · {map.rows}×{map.cols} · 热力座图
           </span>
         )}
+        <button onClick={loadMap} disabled={sid === ""}>
+          刷新（顺带释放到期持座）
+        </button>
       </div>
       <div className="screen">银 幕</div>
       {map && (

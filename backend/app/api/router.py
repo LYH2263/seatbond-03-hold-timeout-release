@@ -1,16 +1,19 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
-from app.models.models import ConflictLog, Hall, SeatHold, Showtime
+from app.models.models import HOLD_STATUSES, ConflictLog, Hall, SeatHold, Showtime
 from app.schemas.schemas import (
     ConflictOut,
     HallOut,
     HoldOut,
     HoldRequest,
+    HoldScanOut,
+    ReleaseScanRequest,
     SeatMapCell,
     SeatMapOut,
     ShowtimeOut,
@@ -22,6 +25,7 @@ from app.services.bond_engine import (
     find_bond_across_rows,
     find_contiguous_block,
 )
+from app.services.hold_expiry import active_holds_query, release_expired_holds
 
 api_router = APIRouter()
 
@@ -72,13 +76,14 @@ def seatmap(showtime_id: int, db: Session = Depends(get_db)):
     hall = db.get(Hall, st.hall_id)
     assert hall
     aisles = set(_aisles(hall))
-    holds = db.scalars(select(SeatHold).where(SeatHold.showtime_id == showtime_id)).all()
+    # 懒释放：刷新座位图时到期持座即转为已释放，保证占用与释放结果一致。
+    release_expired_holds(db, showtime_id=showtime_id)
+    holds = db.scalars(active_holds_query(showtime_id=showtime_id)).all()
     occupied: set[tuple[int, int]] = set()
     for h in holds:
         for c in range(h.start_col, h.end_col + 1):
             occupied.add((h.row, c))
     cells: list[SeatMapCell] = []
-    total = hall.rows * hall.cols
     for r in range(1, hall.rows + 1):
         for c in range(1, hall.cols + 1):
             occ = (r, c) in occupied
@@ -101,8 +106,40 @@ def seatmap(showtime_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.get("/holds", response_model=list[HoldOut])
-def list_holds(db: Session = Depends(get_db)):
-    return db.scalars(select(SeatHold).order_by(SeatHold.id.desc())).all()
+def list_holds(
+    status: str | None = None,
+    showtime_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """持座列表。status=held 仅持有中，status=released 仅已释放；
+    不传则全部返回（已释放记录保留用于对账，不做物理删除）。"""
+    if status is not None and status not in HOLD_STATUSES:
+        raise HTTPException(400, f"非法状态，可选：{', '.join(HOLD_STATUSES)}")
+    q = select(SeatHold)
+    if status is not None:
+        q = q.where(SeatHold.status == status)
+    if showtime_id is not None:
+        q = q.where(SeatHold.showtime_id == showtime_id)
+    q = q.order_by(SeatHold.id.desc())
+    return db.scalars(q).all()
+
+
+@api_router.post("/holds/release-scan", response_model=HoldScanOut)
+def scan_release(body: ReleaseScanRequest | None = None, db: Session = Depends(get_db)):
+    """超时扫描释放：body 带 showtime_id 则只扫该场次，缺省/为 null 全局扫描。
+
+    幂等：只挑 status=held 且 expires_at 已到的行原地改状态，
+    已释放行不会重复处理，也不会新增任何持座记录。
+    """
+    showtime_id = body.showtime_id if body else None
+    if showtime_id is not None and not db.get(Showtime, showtime_id):
+        raise HTTPException(404, "场次不存在")
+    released = release_expired_holds(db, showtime_id=showtime_id)
+    return HoldScanOut(
+        showtime_id=showtime_id,
+        released_count=len(released),
+        released_ids=[h.id for h in released],
+    )
 
 
 @api_router.get("/conflicts", response_model=list[ConflictOut])
@@ -118,7 +155,9 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
     hall = db.get(Hall, st.hall_id)
     assert hall
     aisles = set(_aisles(hall))
-    existing = db.scalars(select(SeatHold).where(SeatHold.showtime_id == body.showtime_id)).all()
+    # 先把本场次到期的持座释放掉，腾空唯一占位，随后才能在同格写入新锁座。
+    release_expired_holds(db, showtime_id=body.showtime_id)
+    existing = db.scalars(active_holds_query(showtime_id=body.showtime_id)).all()
     holds = [HoldSpan(row=h.row, start_col=h.start_col, end_col=h.end_col) for h in existing]
     seats_by_row: dict[int, list[SeatCell]] = {}
     for r in range(1, hall.rows + 1):
@@ -156,7 +195,8 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
         db.commit()
         raise HTTPException(409, "与既有持座冲突")
 
-    code = f"SB-{int(datetime.utcnow().timestamp()) % 100000:05d}"
+    now = datetime.utcnow()
+    code = f"SB-{int(now.timestamp()) % 100000:05d}"
     hold = SeatHold(
         showtime_id=body.showtime_id,
         order_code=code,
@@ -164,6 +204,7 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
         start_col=block.start_col,
         end_col=block.end_col,
         party_size=body.party_size,
+        expires_at=now + timedelta(seconds=settings.hold_ttl_seconds),
     )
     db.add(hold)
     db.commit()

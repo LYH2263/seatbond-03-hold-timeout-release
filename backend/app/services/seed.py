@@ -3,7 +3,11 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.models import ConflictLog, Hall, SeatHold, Showtime
+
+# 种子里的常规持座保留这么久的剩余持有时长
+_FRESH_HOLD = timedelta(seconds=settings.hold_ttl_seconds)
 
 
 def seed_if_empty(db: Session) -> None:
@@ -21,9 +25,25 @@ def seed_if_empty(db: Session) -> None:
     db.flush()
     db.add_all(
         [
-            SeatHold(showtime_id=s1.id, order_code="SB-1001", row=3, start_col=2, end_col=4, party_size=3),
-            SeatHold(showtime_id=s1.id, order_code="SB-1002", row=5, start_col=7, end_col=9, party_size=3),
-            SeatHold(showtime_id=s3.id, order_code="SB-1003", row=2, start_col=1, end_col=2, party_size=2),
+            SeatHold(
+                showtime_id=s1.id, order_code="SB-1001", row=3, start_col=2, end_col=4,
+                party_size=3, created_at=now, expires_at=now + _FRESH_HOLD,
+            ),
+            SeatHold(
+                showtime_id=s1.id, order_code="SB-1002", row=5, start_col=7, end_col=9,
+                party_size=3, created_at=now, expires_at=now + _FRESH_HOLD,
+            ),
+            SeatHold(
+                showtime_id=s3.id, order_code="SB-1003", row=2, start_col=1, end_col=2,
+                party_size=2, created_at=now, expires_at=now + _FRESH_HOLD,
+            ),
+            # 脏数据：创建时间与到期时刻都已过去，但状态仍是持有中。
+            # 扫描释放后应变为 released，且 R1C1-2 能被新锁座重新写入。
+            SeatHold(
+                showtime_id=s1.id, order_code="SB-1004", row=1, start_col=1, end_col=2,
+                party_size=2, created_at=now - timedelta(minutes=15),
+                expires_at=now - timedelta(minutes=10),
+            ),
         ]
     )
     db.add(ConflictLog(showtime_id=s1.id, party_size=4, reason="与既有持座重叠：第3排 2-4"))

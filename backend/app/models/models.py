@@ -1,9 +1,13 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+HOLD_STATUS_HELD = "held"
+HOLD_STATUS_RELEASED = "released"
+HOLD_STATUSES = (HOLD_STATUS_HELD, HOLD_STATUS_RELEASED)
 
 
 class Hall(Base):
@@ -28,7 +32,20 @@ class Showtime(Base):
 
 class SeatHold(Base):
     __tablename__ = "seat_holds"
-    __table_args__ = (UniqueConstraint("showtime_id", "row", "start_col", "end_col", name="uq_hold_span"),)
+    __table_args__ = (
+        # 只有「持有中」的格子占位；已释放行保留主键与原排列用于对账，
+        # 因此同一坐标允许在旧记录释放后再次写入新持座。
+        Index(
+            "uq_hold_span_active",
+            "showtime_id",
+            "row",
+            "start_col",
+            "end_col",
+            unique=True,
+            postgresql_where=text("status = 'held'"),
+            sqlite_where=text("status = 'held'"),
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     showtime_id: Mapped[int] = mapped_column(ForeignKey("showtimes.id"))
     order_code: Mapped[str] = mapped_column(String(40))
@@ -36,8 +53,10 @@ class SeatHold(Base):
     start_col: Mapped[int] = mapped_column(Integer)
     end_col: Mapped[int] = mapped_column(Integer)
     party_size: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(20), default="held")
+    status: Mapped[str] = mapped_column(String(20), default=HOLD_STATUS_HELD)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     showtime: Mapped[Showtime] = relationship(back_populates="holds")
 
 
